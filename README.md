@@ -75,38 +75,60 @@ This section explains how to configure the application to use a local Ollama ins
 *   Check the terminal output where you launched Streamlit for connection messages or errors from the `OllamaVisionLLMConnector`. The sidebar in the application will also indicate if it's attempting to use Ollama or has fallen back to the Mock LLM.
 
 **4. Example Prompt for `OllamaVisionLLMConnector`**:
-The application uses a detailed prompt to instruct the Ollama model. Here's a template of the prompt used in `receipt_scanner/app/vision_llm.py`:
+The application uses a detailed prompt to instruct the Ollama model. Here's the "Master Prompt" used in `receipt_scanner/app/vision_llm.py`:
 ```python
-prompt = f'''You are an expert receipt processing AI. Analyze the provided receipt image and extract the following information. Return ONLY a valid JSON object with the specified fields. Do not include any explanatory text or markdown formatting before or after the JSON.
+    # Full prompt string used in OllamaVisionLLMConnector.extract_data()
+    prompt = f'''You are a professional financial document parser.
 
-        JSON fields to extract:
-        - vendor: string (name of the store or vendor)
-        - date: string (date of the receipt in YYYY-MM-DD format. If year is missing, assume current year. If format is different, convert it.)
-        - amount: float (total amount paid)
-        - category: string (e.g., "Groceries", "Electronics", "Restaurant", "Travel", "Office Supplies", "Other". Infer from items if possible.)
-        - tags: list of strings (relevant keywords or items from the receipt, e.g., ["milk", "apples", "printer ink"])
-        - payment_method: string (e.g., "Credit Card", "Cash", "Debit Card")
-        - notes: string (any brief additional notes, or a summary of items if full itemization is too complex for primary fields)
-        - location: string (store address or city, if available)
-        - raw_text: string (the full raw text extracted from the receipt by OCR, if you can provide it)
+Your task is to extract structured, tax-relevant data from a scanned or photographed receipt image. The receipt may contain printed and/or handwritten text. Please extract the following fields with high accuracy and return the results as valid JSON.
 
-        Example JSON:
-        {{
-          "vendor": "ExampleMart",
-          "date": "2024-03-15",
-          "amount": 123.45,
-          "category": "Groceries",
-          "tags": ["apples", "milk", "bread"],
-          "payment_method": "Visa ****1234",
-          "notes": "Weekly grocery run.",
-          "location": "123 Main St, Anytown",
-          "raw_text": "..."
-        }}
+Return `null` for any field that is missing, unreadable, or ambiguous. Only return information that is explicitly visible in the image. Do not infer or hallucinate values.
 
-        Ensure all string values are properly escaped within the JSON.
-        The receipt image is provided. Extract the data now.
-        '''
+---
+
+📤 Output Format (JSON):
+
+{{
+  "vendor": "string",                  // The store or business name (e.g., "Costco")
+  "date": "YYYY-MM-DD",             // Transaction date in ISO format (e.g., "2025-06-03")
+  "total": 0.00,                   // Total amount paid (e.g., 54.99)
+  "currency": "string",               // Currency symbol or ISO code (e.g., "USD", "EUR", "$")
+  "category": "string",               // Suggested tax category (e.g., "Meals", "Gas", "Office Supplies")
+  "tags": ["string"],                 // 1–3 short, relevant keywords for sorting or filtering (e.g., ["Fuel", "Client Trip"])
+  "payment_method": "string",         // Payment method shown on receipt (e.g., "Visa", "Cash", "Mastercard"), or null
+  "location": "string",               // City and state or store address, if visible
+  "notes": "string",                  // Any visible memo, handwritten annotation, or purpose-related text
+  "confidence_score": 0.0         // Overall confidence in extraction (0.0 to 1.0)
+}}
+
+---
+
+🧠 Extraction Notes:
+
+- `vendor`: Extract the store name, usually in the header or logo. Strip address and branding if possible.
+- `date`: Only return the **transaction date**, not print time or customer service timestamps.
+- `total`: Use the **final charged amount** only. Exclude subtotal or tip unless labeled clearly.
+- `currency`: Extract symbol or use ISO format if shown. Default to "USD" only if confirmed. If non-USD, please include this information clearly, for example, in the 'notes' field or by adding a specific tag like 'currency:EUR'.
+- `category`: Suggest a tax-relevant category, even if not explicitly printed. Examples: Office Supplies, Travel, Meals, Lodging, Software, Fuel, Other.
+- `tags`: Generate short, helpful tags based on the vendor, items, purpose, or context (e.g., "Gas", "Client Lunch", "Ink").
+- `payment_method`: Only include if explicitly shown or printed on the receipt.
+- `location`: Include city/state or address if visible. If not, return `null`.
+- `notes`: Copy any hand-written purpose, notes, or item remarks, especially if tax-related. Include currency details here if non-USD and not captured elsewhere.
+- `confidence_score`: Estimate based on text quality, clarity, and completeness.
+
+---
+
+📌 Guidelines:
+
+- If the image contains handwriting, do your best to transcribe it.
+- If text is blurry or partially missing, return `null` for affected fields.
+- If you detect multiple receipts in one image, extract only the largest or clearest one.
+- Do not make up or infer information not clearly shown.
+
+Return only a single, clean JSON object with no extra commentary.
+'''
 ```
+*Note: The application's Python code maps the `total` field from the LLM's JSON output to an internal `amount` field. Non-USD `currency` information is typically appended to the `notes` field by the LLM as per prompt guidance.*
 
 **5. Important Notes**:
 *   LLM performance and extraction accuracy heavily depend on the specific vision model used (e.g., `llava:7b` vs. `llava:34b`) and the clarity of the receipt images.

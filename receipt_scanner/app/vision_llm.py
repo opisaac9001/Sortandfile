@@ -113,35 +113,68 @@ class OllamaVisionLLMConnector(VisionLLMConnector):
         if base64_image_string is None:
             return None
 
-        prompt = f'''You are an expert receipt processing AI. Analyze the provided receipt image and extract the following information. Return ONLY a valid JSON object with the specified fields. Do not include any explanatory text or markdown formatting before or after the JSON.
+        prompt = '''SYSTEM MESSAGE / INSTRUCTION
+You are a financial document parser.
+Your task is to analyze receipt images and return structured data in a JSON format for tax documentation purposes.
+You must extract all relevant information cleanly and accurately. If information is unclear or missing, return null for the field and provide a confidence score for the overall result.
 
-        JSON fields to extract:
-        - vendor: string (name of the store or vendor)
-        - date: string (date of the receipt in YYYY-MM-DD format. If year is missing, assume current year. If format is different, convert it.)
-        - amount: float (total amount paid)
-        - category: string (e.g., "Groceries", "Electronics", "Restaurant", "Travel", "Office Supplies", "Other". Infer from items if possible.)
-        - tags: list of strings (relevant keywords or items from the receipt, e.g., ["milk", "apples", "printer ink"])
-        - payment_method: string (e.g., "Credit Card", "Cash", "Debit Card")
-        - notes: string (any brief additional notes, or a summary of items if full itemization is too complex for primary fields)
-        - location: string (store address or city, if available)
-        - raw_text: string (the full raw text extracted from the receipt by OCR, if you can provide it)
+USER MESSAGE / IMAGE + PROMPT TEXT
 
-        Example JSON:
-        {{
-          "vendor": "ExampleMart",
-          "date": "2024-03-15",
-          "amount": 123.45,
-          "category": "Groceries",
-          "tags": ["apples", "milk", "bread"],
-          "payment_method": "Visa ****1234",
-          "notes": "Weekly grocery run.",
-          "location": "123 Main St, Anytown",
-          "raw_text": "..."
-        }}
+Please analyze the receipt image provided and extract the following fields as structured JSON.
 
-        Ensure all string values are properly escaped within the JSON.
-        The receipt image is provided. Extract the data now.
-        '''
+🎯 Required Output Format (JSON):
+
+{{
+  "vendor": "string",                   // The store or business name (e.g., 'Costco')
+  "date": "YYYY-MM-DD",                // The transaction date (ISO format)
+  "total_amount": 0.00,                // The total amount paid (numeric)
+  "currency": "USD",                   // Currency symbol or ISO code. If not USD, try to include it in notes or as a tag like 'currency:XXX'.
+  "category": "string",                // Suggested tax category (e.g., 'Office Supplies', 'Meals')
+  "tags": ["tag1", "tag2"],            // Suggested tags (e.g., ['Gas', 'Client Travel'])
+  "payment_method": "string",          // If visible (e.g., 'Visa', 'Cash'), otherwise null
+  "location": "string",                // City/state if visible or inferred, otherwise null
+  "notes": "string",                   // Any visible memo, client/job note, or hand-written annotation. Include currency here if non-USD and not in a tag.
+  "raw_text": "string",                // Full OCR text if possible, otherwise null
+  "confidence_score": 0.00             // Confidence score from 0.0 to 1.0 for the overall extraction
+}}
+
+🧠 Instructions for Each Field:
+    • vendor: Extract from store logo, name, or header. Clean it to be consistent (no address unless embedded).
+    • date: Extract only the transaction date (not print time or batch number). Return in YYYY-MM-DD format. If year is missing, try to infer from context or use current year.
+    • total_amount: Return the total amount charged to the customer, not subtotal or tip unless labeled as the final total. Must be a numeric value.
+    • currency: If shown, extract symbol or use ‘USD’ if unknown. Accept $, €, etc. If not USD, please try to note it in the 'notes' field or add a tag like 'currency:EUR'.
+    • category: Suggest a tax-deductible category based on the receipt. Example categories: Office Supplies, Meals & Entertainment, Gas, Travel, Lodging, Software, Equipment, Other.
+    • tags: Generate up to 3-5 relevant, short keyword-style tags to help the user sort expenses. These may include purpose, item type, vendor class, etc.
+    • payment_method: If shown (card type, cash, etc.), extract it. Otherwise return null.
+    • location: If city, store address, or region is visible, extract it. If not visible, return null.
+    • notes: Include any handwritten or printed memo fields, such as purpose, client name, project, or hand-written tax notes. If currency is other than USD and not captured elsewhere, include it here.
+    • raw_text: Provide the full raw text extracted from the receipt by OCR, if possible. If not, return null.
+    • confidence_score: Assign an overall confidence score from 0.0 to 1.0 based on clarity, legibility, and completeness of data extracted for the key fields (vendor, date, total_amount).
+
+🔁 Special Handling:
+    • If the receipt contains handwriting, do your best to interpret and extract it. If unsure, return the field as null and note it in confidence.
+    • If there are multiple totals, choose the most prominent or labeled final total.
+    • Ignore non-transactional text like footer ads or surveys.
+    • Do not hallucinate data — return null for fields not confidently detected.
+    • Ensure the entire output is ONLY the JSON object, with no surrounding text or markdown.
+
+Example Output (for guidance, actual content will vary):
+
+{{
+  "vendor": "Shell",
+  "date": "2025-06-03",
+  "total_amount": 45.90,
+  "currency": "USD",
+  "category": "Travel",
+  "tags": ["Gas", "Client Visit", "Vehicle", "currency:USD"],
+  "payment_method": "Visa",
+  "location": "Santa Monica, CA",
+  "notes": "Fuel for client site trip.",
+  "raw_text": "Shell Station #123 ...",
+  "confidence_score": 0.91
+}}
+The receipt image is provided. Extract the data now.
+'''
 
         payload = {
             "model": self.model_name,
@@ -188,30 +221,72 @@ class OllamaVisionLLMConnector(VisionLLMConnector):
                     needs_manual_review = True; parsed_data_dict = {}
                     extraction_confidence = 0.20 # Very low confidence for unparsable JSON
 
-            # Map to ReceiptData, handling potential missing keys gracefully
+            # Map to ReceiptData fields, aligning with the new prompt's JSON structure
+            vendor = parsed_data_dict.get('vendor')
+            receipt_date_str = parsed_data_dict.get('date')
+            amount_val = parsed_data_dict.get('total_amount') # Changed from 'amount'
+            category = parsed_data_dict.get('category', "Uncategorized") # Pydantic default
+            tags = parsed_data_dict.get('tags', []) # Pydantic default
+            payment_method = parsed_data_dict.get('payment_method')
+            notes = parsed_data_dict.get('notes')
+            location = parsed_data_dict.get('location')
+            raw_text_from_llm = parsed_data_dict.get('raw_text')
+
+            # Handle confidence score from LLM if provided and valid
+            confidence_from_llm = parsed_data_dict.get('confidence_score')
+            final_confidence_score = None
+            if isinstance(confidence_from_llm, (float, int)) and 0.0 <= confidence_from_llm <= 1.0:
+                final_confidence_score = float(confidence_from_llm)
+            else:
+                if confidence_from_llm is not None: # Log if score is present but invalid
+                    print(f"OllamaVisionLLM: Warning - LLM provided invalid confidence score: {confidence_from_llm}. Will calculate based on fields.")
+                # If not provided or invalid, it will be determined based on field presence / parsing status
+
+            # Initial needs_review status from parsing step (e.g. if JSON was malformed)
+            current_needs_review = needs_manual_review
+
+            # Validate amount type
+            parsed_amount = None
+            if amount_val is not None:
+                try:
+                    parsed_amount = float(amount_val)
+                except (ValueError, TypeError):
+                    print(f"OllamaVisionLLM: Warning - Could not parse 'total_amount' ({amount_val}) as float. Flagging for review.")
+                    current_needs_review = True
+                    notes = f"{notes or ''} [System Note: Original amount '{amount_val}' could not be parsed]".strip()
+
+
+            # Check for essential fields to determine needs_review and adjust confidence
+            if not all([vendor, receipt_date_str, parsed_amount is not None]):
+                print("OllamaVisionLLM: Essential fields (vendor, date, or total_amount) missing or invalid. Flagging for review.")
+                current_needs_review = True
+                # If confidence wasn't already lowered by parsing issues, set a lower one
+                if final_confidence_score is None or final_confidence_score > 0.6:
+                     final_confidence_score = 0.60
+
+            if final_confidence_score is None: # If still None after checks (e.g. LLM didn't provide one, and key fields were okay)
+                final_confidence_score = 0.85 # Default if everything seems okay but no score from LLM
+
+            # Further reduce confidence if needs_review is true for other reasons
+            if current_needs_review and (final_confidence_score > 0.7): # Cap confidence if review needed
+                 final_confidence_score = 0.7
+
+
             receipt_info = ReceiptData(
-                vendor=parsed_data_dict.get('vendor'),
-                date=parsed_data_dict.get('date'), # Further validation/parsing can be added here or in Pydantic model
-                amount=parsed_data_dict.get('amount'),
-                category=parsed_data_dict.get('category', "Uncategorized"),
-                tags=parsed_data_dict.get('tags', []),
-                payment_method=parsed_data_dict.get('payment_method'),
-                notes=parsed_data_dict.get('notes'),
-                location=parsed_data_dict.get('location'),
+                vendor=vendor,
+                date=receipt_date_str,
+                amount=parsed_amount,
+                category=category,
+                tags=tags if isinstance(tags, list) else [],
+                payment_method=payment_method,
+                notes=notes,
+                location=location,
                 source_file=str(image_path.resolve()),
-                confidence_score=extraction_confidence, # Placeholder
-                raw_text=parsed_data_dict.get('raw_text', extracted_json_str if needs_manual_review else None), # Store original string if parsing failed
-                needs_review=needs_manual_review
+                confidence_score=final_confidence_score,
+                raw_text=raw_text_from_llm if raw_text_from_llm else (extracted_json_str if needs_manual_review else None),
+                needs_review=current_needs_review
             )
-
-            # Additional check for essential fields to flag for review
-            if not receipt_info.vendor or not receipt_info.date or receipt_info.amount is None:
-                print("OllamaVisionLLM: Essential fields (vendor, date, or amount) missing. Flagging for review.")
-                receipt_info.needs_review = True
-                if receipt_info.confidence_score == extraction_confidence: # If not already lowered by parsing error
-                    receipt_info.confidence_score = 0.60 # Lower confidence if key fields are missing
-
-            print(f"OllamaVisionLLM: Data extraction successful for {image_path.name} (Needs Review: {receipt_info.needs_review})")
+            print(f"OllamaVisionLLM: Data extraction processed for {image_path.name} (Needs Review: {receipt_info.needs_review}, Confidence: {receipt_info.confidence_score})")
 
         except requests.exceptions.RequestException as e:
             print(f"❌ OllamaVisionLLM: API request failed: {e}")
